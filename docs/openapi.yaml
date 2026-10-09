@@ -1,0 +1,977 @@
+openapi: 3.1.0
+info:
+  title: Party Finder API
+  version: 1.0.0
+  summary: Shared calendar of plans
+  description: |
+    Contract v1 between Backend (`apps/api`) and Frontend (`apps/web`).
+    The Zod schemas in `packages/shared` are the executable version of this document;
+    both must always agree (a test in `packages/shared` checks routes and status codes).
+
+    ## Sessions
+    The session travels in an `httpOnly`, `Secure`, `SameSite=Lax` cookie set by
+    `POST /auth/login` and `POST /auth/register`. The API never returns session tokens.
+
+    ## CSRF
+    Every `POST`, `PATCH` and `DELETE` request must send the `X-CSRF-Token` header.
+    Get the token from `GET /auth/csrf`. The token is bound to the current session,
+    so fetch a new one after login, register and logout. A missing or wrong token
+    returns `403 CSRF_INVALID`.
+
+    ## Errors
+    Every non-2xx response uses the single `ApiError` format `{ code, message, details? }`.
+    `message` is a human-readable Spanish text that the UI may show. Validation errors
+    (`400 VALIDATION_ERROR`) carry `details.issues[]` with the path of each offending field.
+    Unknown body fields are rejected with `400 VALIDATION_ERROR`.
+
+    Besides the responses listed per operation, any endpoint may return
+    `429 RATE_LIMITED` (general per-IP limit, with a `Retry-After` header) and
+    `500 INTERNAL_ERROR`.
+
+    ## Dates and times
+    - Calendar dates are `YYYY-MM-DD` with no time zone.
+    - `startTime` and `endTime` are times of day `HH:mm`; the date comes from the calendar entry.
+      `endTime` may be earlier than `startTime` (the event runs past midnight).
+    - Timestamps (`createdAt`, `updatedAt`) are ISO 8601 in UTC.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: /api
+    description: Same origin, through the Vite dev proxy or Caddy (prefix stripped)
+  - url: http://localhost:3000
+    description: API directly, local development
+tags:
+  - name: auth
+    description: Registration, login and session
+  - name: event-templates
+    description: Reusable event templates (the "Eventos" module)
+  - name: uploads
+    description: Image uploads for templates
+  - name: calendar
+    description: Calendar entries and attendance
+
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      operationId: register
+      summary: Create a user and open a session
+      description: Requires a valid Cloudflare Turnstile token. Usernames are unique case-insensitively.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created; the session cookie is set.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SetSessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUserResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestOrCaptcha'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '409':
+          description: '`USERNAME_TAKEN`: the username already exists.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: USERNAME_TAKEN
+                message: Ese nombre de usuario ya está en uso
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Open a session
+      description: Strict rate limit per IP and per username, with progressive delay after failures.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Logged in; the session cookie is set.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SetSessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUserResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: >-
+            `INVALID_CREDENTIALS`. Always the same generic message, whether the username
+            does not exist or the password is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: INVALID_CREDENTIALS
+                message: Usuario o contraseña incorrectos
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Close the current session
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Session destroyed and cookie cleared.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: Current user, or null without a session
+      security:
+        - {}
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Never fails for anonymous visitors; `user` is `null` instead.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+
+  /auth/csrf:
+    get:
+      tags: [auth]
+      operationId: getCsrfToken
+      summary: Get a CSRF token for the current session (anonymous or authenticated)
+      security:
+        - {}
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Token to send in the `X-CSRF-Token` header.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrfResponse'
+
+  /event-templates:
+    get:
+      tags: [event-templates]
+      operationId: listEventTemplates
+      summary: List all templates, newest first
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: One page of templates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventTemplatePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    post:
+      tags: [event-templates]
+      operationId: createEventTemplate
+      summary: Create a template owned by the current user
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEventTemplateRequest'
+      responses:
+        '201':
+          description: Template created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventTemplate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+
+  /event-templates/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    patch:
+      tags: [event-templates]
+      operationId: updateEventTemplate
+      summary: Partially update a template (owner only)
+      description: >-
+        Changes are reflected in every calendar entry that uses the template.
+        Send `null` to clear an optional field; omit a field to leave it unchanged.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEventTemplateRequest'
+      responses:
+        '200':
+          description: Updated template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventTemplate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ForbiddenOrCsrf'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [event-templates]
+      operationId: deleteEventTemplate
+      summary: Delete a template (owner only)
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Template deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ForbiddenOrCsrf'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`TEMPLATE_IN_USE`: at least one calendar entry uses this template.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: TEMPLATE_IN_USE
+                message: La plantilla está en uso en el calendario
+
+  /uploads/image:
+    post:
+      tags: [uploads]
+      operationId: uploadImage
+      summary: Upload a template image
+      description: >-
+        Max 5 MB (5242880 bytes). Accepted types: JPEG, PNG and WebP, checked on the real
+        file content, not the declared type. SVG is rejected. The image is re-encoded to
+        WebP and stored under a random name. Use the returned `url` as `imageUrl`.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  contentMediaType: application/octet-stream
+                  description: The image file.
+            encoding:
+              file:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '201':
+          description: Image stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadImageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '413':
+          description: '`PAYLOAD_TOO_LARGE`: the file exceeds 5 MB.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '415':
+          description: '`UNSUPPORTED_MEDIA_TYPE`: not a JPEG, PNG or WebP image.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /calendar:
+    get:
+      tags: [calendar]
+      operationId: getCalendar
+      summary: Entries between two dates (both inclusive)
+      description: >-
+        Public. The range may cover at most 42 days (`to - from + 1 <= 42`), enough for a
+        6-week month grid. `isAttending` and `canDelete` are computed for the current user
+        and are `false` without a session.
+      security:
+        - {}
+        - sessionCookie: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/IsoDate'
+        - name: to
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/IsoDate'
+      responses:
+        '200':
+          description: Entries ordered by date, then creation time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /calendar/entries:
+    post:
+      tags: [calendar]
+      operationId: createCalendarEntry
+      summary: Add a template to a day
+      description: >-
+        At most 4 entries per date, checked inside a transaction that locks the date.
+        `capacity` (1–10) is fixed once created; the UI pre-selects the template's `attendees`.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCalendarEntryRequest'
+      responses:
+        '201':
+          description: Entry created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`DAY_FULL`: the date already has 4 entries.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: DAY_FULL
+                message: Este día ya tiene 4 eventos
+
+  /calendar/entries/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    delete:
+      tags: [calendar]
+      operationId: deleteCalendarEntry
+      summary: Remove an entry from its day (only the user who added it)
+      description: Its attendances are deleted with it.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Entry deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ForbiddenOrCsrf'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /calendar/entries/{id}/attendance:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [calendar]
+      operationId: attend
+      summary: Sign the current user up for an entry
+      description: The entry row is locked while attendees are counted against `capacity`.
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '201':
+          description: Signed up. Returns the entry with the updated attendee list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`ENTRY_FULL` (no places left) or `ALREADY_ATTENDING`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              examples:
+                full:
+                  value:
+                    code: ENTRY_FULL
+                    message: El evento está completo
+                already:
+                  value:
+                    code: ALREADY_ATTENDING
+                    message: Ya estás apuntado a este evento
+    delete:
+      tags: [calendar]
+      operationId: unattend
+      summary: Remove the current user from an entry
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: No longer attending.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '404':
+          description: '`NOT_FOUND`: the entry does not exist or the user is not attending it.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+security:
+  - sessionCookie: []
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pf_session
+      description: Opaque session id in an httpOnly cookie. Clients never read it.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Token from `GET /auth/csrf`.
+      schema:
+        type: string
+        minLength: 1
+
+  headers:
+    SetSessionCookie:
+      description: '`pf_session=<opaque>; HttpOnly; Secure; SameSite=Lax; Path=/`'
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: '`VALIDATION_ERROR`: body, query or path failed validation.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+          example:
+            code: VALIDATION_ERROR
+            message: Datos no válidos
+            details:
+              issues:
+                - path: [capacity]
+                  message: Máximo 10
+    BadRequestOrCaptcha:
+      description: '`VALIDATION_ERROR`, or `CAPTCHA_FAILED` when the Turnstile token is rejected.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          examples:
+            validation:
+              value:
+                code: VALIDATION_ERROR
+                message: Datos no válidos
+                details:
+                  issues:
+                    - path: [username]
+                      message: Mínimo 3 caracteres
+            captcha:
+              value:
+                code: CAPTCHA_FAILED
+                message: No se pudo verificar el CAPTCHA
+    Unauthenticated:
+      description: '`UNAUTHENTICATED`: a session is required.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: UNAUTHENTICATED
+            message: Debes iniciar sesión
+    CsrfInvalid:
+      description: '`CSRF_INVALID`: missing or wrong `X-CSRF-Token`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: CSRF_INVALID
+            message: Token CSRF no válido
+    ForbiddenOrCsrf:
+      description: '`FORBIDDEN` (not the owner / creator) or `CSRF_INVALID`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          examples:
+            forbidden:
+              value:
+                code: FORBIDDEN
+                message: No tienes permiso para esta acción
+            csrf:
+              value:
+                code: CSRF_INVALID
+                message: Token CSRF no válido
+    NotFound:
+      description: '`NOT_FOUND`: the resource does not exist.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: NOT_FOUND
+            message: No encontrado
+    RateLimited:
+      description: '`RATE_LIMITED`: too many attempts.'
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: RATE_LIMITED
+            message: Demasiados intentos, prueba más tarde
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    IsoDate:
+      type: string
+      format: date
+      description: Calendar date `YYYY-MM-DD`, no time zone.
+      examples: ['2026-10-12']
+    IsoDateTime:
+      type: string
+      format: date-time
+      description: UTC timestamp.
+    TimeOfDay:
+      type: string
+      pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+      description: Time of day `HH:mm`, 24-hour clock.
+      examples: ['18:30']
+    Capacity:
+      type: integer
+      minimum: 1
+      maximum: 10
+    EventType:
+      type: string
+      enum: [LAN_PARTY, JUEGO_ONLINE, PLAN_GATO, DND, PASEO, PSICOLOGO, PELUQUERIA, OTROS]
+      description: >-
+        Spanish labels live in `@party-finder/shared` (`EVENT_TYPE_LABELS`): LAN PARTY,
+        Juego online, Plan de Gato, D&D, Paseo, Psicólogo, Peluquería, Otros.
+
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: >-
+            Machine-readable code. Known values: VALIDATION_ERROR, CAPTCHA_FAILED,
+            UNAUTHENTICATED, INVALID_CREDENTIALS, CSRF_INVALID, FORBIDDEN, NOT_FOUND,
+            USERNAME_TAKEN, TEMPLATE_IN_USE, DAY_FULL, ENTRY_FULL, ALREADY_ATTENDING,
+            PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, RATE_LIMITED, INTERNAL_ERROR.
+        message:
+          type: string
+        details: {}
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+        - type: object
+          required: [details]
+          properties:
+            details:
+              $ref: '#/components/schemas/ValidationErrorDetails'
+    ValidationErrorDetails:
+      type: object
+      required: [issues]
+      properties:
+        issues:
+          type: array
+          items:
+            type: object
+            required: [path, message]
+            properties:
+              path:
+                type: array
+                items:
+                  oneOf:
+                    - type: string
+                    - type: integer
+              message:
+                type: string
+
+    UserSummary:
+      type: object
+      required: [id, username]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        username:
+          type: string
+
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, captchaToken]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 30
+          pattern: '^[A-Za-z0-9_-]+$'
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        captchaToken:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: Cloudflare Turnstile token.
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      description: Only the shape is validated; a malformed username yields the generic 401.
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 120
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+    AuthUserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/UserSummary'
+    MeResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          oneOf:
+            - $ref: '#/components/schemas/UserSummary'
+            - type: 'null'
+    CsrfResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+
+    EventTemplate:
+      type: object
+      required:
+        [
+          id,
+          owner,
+          name,
+          description,
+          type,
+          imageUrl,
+          attendees,
+          startTime,
+          endTime,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        owner:
+          $ref: '#/components/schemas/UserSummary'
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          $ref: '#/components/schemas/EventType'
+        imageUrl:
+          type: [string, 'null']
+        attendees:
+          description: Default capacity offered when adding the template to a day.
+          oneOf:
+            - $ref: '#/components/schemas/Capacity'
+            - type: 'null'
+        startTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+        endTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+        createdAt:
+          $ref: '#/components/schemas/IsoDateTime'
+        updatedAt:
+          $ref: '#/components/schemas/IsoDateTime'
+    CreateEventTemplateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, description, type]
+      description: '`name` and `description` are trimmed before validation.'
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        type:
+          $ref: '#/components/schemas/EventType'
+        imageUrl:
+          type: [string, 'null']
+          format: uri
+          maxLength: 2048
+          description: A URL returned by `POST /uploads/image`; other hosts are rejected.
+        attendees:
+          oneOf:
+            - $ref: '#/components/schemas/Capacity'
+            - type: 'null'
+        startTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+        endTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+    UpdateEventTemplateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: Same fields as creation, all optional; at least one is required.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        type:
+          $ref: '#/components/schemas/EventType'
+        imageUrl:
+          type: [string, 'null']
+          format: uri
+          maxLength: 2048
+        attendees:
+          oneOf:
+            - $ref: '#/components/schemas/Capacity'
+            - type: 'null'
+        startTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+        endTime:
+          oneOf:
+            - $ref: '#/components/schemas/TimeOfDay'
+            - type: 'null'
+    EventTemplatePage:
+      type: object
+      required: [items, page, pageSize, total, totalPages]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventTemplate'
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 50
+        total:
+          type: integer
+          minimum: 0
+        totalPages:
+          type: integer
+          minimum: 0
+
+    UploadImageResponse:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+
+    CalendarEntry:
+      type: object
+      required:
+        [
+          id,
+          date,
+          capacity,
+          attendeeCount,
+          attendees,
+          addedBy,
+          template,
+          createdAt,
+          isAttending,
+          canDelete,
+        ]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        date:
+          $ref: '#/components/schemas/IsoDate'
+        capacity:
+          $ref: '#/components/schemas/Capacity'
+        attendeeCount:
+          type: integer
+          minimum: 0
+        attendees:
+          type: array
+          description: Ordered by sign-up time, oldest first.
+          items:
+            $ref: '#/components/schemas/UserSummary'
+        addedBy:
+          $ref: '#/components/schemas/UserSummary'
+        template:
+          $ref: '#/components/schemas/EventTemplate'
+        createdAt:
+          $ref: '#/components/schemas/IsoDateTime'
+        isAttending:
+          type: boolean
+          description: The current user is attending. `false` without a session.
+        canDelete:
+          type: boolean
+          description: The current user added this entry. `false` without a session.
+    CalendarResponse:
+      type: object
+      required: [from, to, entries]
+      properties:
+        from:
+          $ref: '#/components/schemas/IsoDate'
+        to:
+          $ref: '#/components/schemas/IsoDate'
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CalendarEntry'
+    CreateCalendarEntryRequest:
+      type: object
+      additionalProperties: false
+      required: [templateId, date, capacity]
+      properties:
+        templateId:
+          $ref: '#/components/schemas/Uuid'
+        date:
+          $ref: '#/components/schemas/IsoDate'
+        capacity:
+          $ref: '#/components/schemas/Capacity'

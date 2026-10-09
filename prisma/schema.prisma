@@ -1,0 +1,101 @@
+// Contract v1.0.0. Owned by the Architect: schema changes that affect the
+// contract go through a change request (see docs/contract-changelog.md).
+//
+// Rules Prisma cannot express live as raw SQL in the initial migration:
+//   - CHECK constraints on lengths, formats and ranges
+//   - username is CITEXT, so uniqueness and lookups are case-insensitive
+// MAX_EVENTS_PER_DAY (4) is enforced by the API inside a transaction.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EventType {
+  LAN_PARTY
+  JUEGO_ONLINE
+  PLAN_GATO
+  DND
+  PASEO
+  PSICOLOGO
+  PELUQUERIA
+  OTROS
+
+  @@map("event_type")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  /// 3–30 chars, [A-Za-z0-9_-]. Case-insensitive unique (CITEXT).
+  username     String   @unique @db.Citext
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  templates       EventTemplate[]
+  calendarEntries CalendarEntry[]
+  attendances     Attendance[]
+
+  @@map("users")
+}
+
+model EventTemplate {
+  id          String    @id @default(uuid()) @db.Uuid
+  ownerId     String    @map("owner_id") @db.Uuid
+  /// 1–80 chars
+  name        String    @db.VarChar(80)
+  /// 1–1000 chars
+  description String    @db.VarChar(1000)
+  type        EventType
+  imageUrl    String?   @map("image_url") @db.VarChar(2048)
+  /// Default capacity (1–10) offered when the template is added to a day
+  attendees   Int?      @db.SmallInt
+  /// Time of day, "HH:mm"
+  startTime   String?   @map("start_time") @db.Char(5)
+  /// Time of day, "HH:mm"
+  endTime     String?   @map("end_time") @db.Char(5)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  owner   User            @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  entries CalendarEntry[]
+
+  @@index([ownerId])
+  @@index([createdAt])
+  @@map("event_templates")
+}
+
+model CalendarEntry {
+  id         String   @id @default(uuid()) @db.Uuid
+  templateId String   @map("template_id") @db.Uuid
+  date       DateTime @db.Date
+  /// 1–10, fixed once created
+  capacity   Int      @db.SmallInt
+  addedById  String   @map("added_by") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  template    EventTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  addedBy     User          @relation(fields: [addedById], references: [id], onDelete: Restrict)
+  attendances Attendance[]
+
+  @@index([date])
+  @@index([templateId])
+  @@index([addedById])
+  @@map("calendar_entries")
+}
+
+model Attendance {
+  entryId   String   @map("entry_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entry CalendarEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([entryId, userId])
+  @@index([userId])
+  @@map("attendances")
+}

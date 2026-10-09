@@ -1,0 +1,115 @@
+-- Contract v1.0.0 — initial schema.
+-- Generated with `prisma migrate diff --from-empty`, then extended by hand with
+-- the CITEXT extension and the CHECK constraints Prisma cannot express.
+
+-- Case-insensitive usernames ("Ana" and "ana" are the same user).
+CREATE EXTENSION IF NOT EXISTS "citext";
+
+-- CreateEnum
+CREATE TYPE "event_type" AS ENUM ('LAN_PARTY', 'JUEGO_ONLINE', 'PLAN_GATO', 'DND', 'PASEO', 'PSICOLOGO', 'PELUQUERIA', 'OTROS');
+
+-- CreateTable
+CREATE TABLE "users" (
+    "id" UUID NOT NULL,
+    "username" CITEXT NOT NULL,
+    "password_hash" TEXT NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "users_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "event_templates" (
+    "id" UUID NOT NULL,
+    "owner_id" UUID NOT NULL,
+    "name" VARCHAR(80) NOT NULL,
+    "description" VARCHAR(1000) NOT NULL,
+    "type" "event_type" NOT NULL,
+    "image_url" VARCHAR(2048),
+    "attendees" SMALLINT,
+    "start_time" CHAR(5),
+    "end_time" CHAR(5),
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ(3) NOT NULL,
+
+    CONSTRAINT "event_templates_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "calendar_entries" (
+    "id" UUID NOT NULL,
+    "template_id" UUID NOT NULL,
+    "date" DATE NOT NULL,
+    "capacity" SMALLINT NOT NULL,
+    "added_by" UUID NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "calendar_entries_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "attendances" (
+    "entry_id" UUID NOT NULL,
+    "user_id" UUID NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "attendances_pkey" PRIMARY KEY ("entry_id","user_id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
+
+-- CreateIndex
+CREATE INDEX "event_templates_owner_id_idx" ON "event_templates"("owner_id");
+
+-- CreateIndex
+CREATE INDEX "event_templates_created_at_idx" ON "event_templates"("created_at");
+
+-- CreateIndex
+CREATE INDEX "calendar_entries_date_idx" ON "calendar_entries"("date");
+
+-- CreateIndex
+CREATE INDEX "calendar_entries_template_id_idx" ON "calendar_entries"("template_id");
+
+-- CreateIndex
+CREATE INDEX "calendar_entries_added_by_idx" ON "calendar_entries"("added_by");
+
+-- CreateIndex
+CREATE INDEX "attendances_user_id_idx" ON "attendances"("user_id");
+
+-- AddForeignKey
+ALTER TABLE "event_templates" ADD CONSTRAINT "event_templates_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "calendar_entries" ADD CONSTRAINT "calendar_entries_template_id_fkey" FOREIGN KEY ("template_id") REFERENCES "event_templates"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "calendar_entries" ADD CONSTRAINT "calendar_entries_added_by_fkey" FOREIGN KEY ("added_by") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "attendances" ADD CONSTRAINT "attendances_entry_id_fkey" FOREIGN KEY ("entry_id") REFERENCES "calendar_entries"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "attendances" ADD CONSTRAINT "attendances_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+
+-- CheckConstraints (hand-written; keep in sync with packages/shared/src/constants.ts)
+ALTER TABLE "users"
+  ADD CONSTRAINT "users_username_format_check"
+  CHECK ("username"::text ~ '^[A-Za-z0-9_-]{3,30}$');
+
+ALTER TABLE "event_templates"
+  ADD CONSTRAINT "event_templates_name_length_check"
+  CHECK (char_length(btrim("name")) BETWEEN 1 AND 80),
+  ADD CONSTRAINT "event_templates_description_length_check"
+  CHECK (char_length(btrim("description")) BETWEEN 1 AND 1000),
+  ADD CONSTRAINT "event_templates_attendees_check"
+  CHECK ("attendees" IS NULL OR "attendees" BETWEEN 1 AND 10),
+  ADD CONSTRAINT "event_templates_start_time_format_check"
+  CHECK ("start_time" IS NULL OR "start_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+  ADD CONSTRAINT "event_templates_end_time_format_check"
+  CHECK ("end_time" IS NULL OR "end_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$');
+
+ALTER TABLE "calendar_entries"
+  ADD CONSTRAINT "calendar_entries_capacity_check"
+  CHECK ("capacity" BETWEEN 1 AND 10);

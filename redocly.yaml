@@ -1,0 +1,8 @@
+extends:
+  - recommended
+rules:
+  # localhost is the real local dev server, not a placeholder.
+  no-server-example.com: off
+  # GET /auth/me and GET /auth/csrf never fail for anonymous users by design
+  # (only the global 429/500 described in info.description apply).
+  operation-4xx-response: off
