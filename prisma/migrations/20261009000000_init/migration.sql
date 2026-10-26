@@ -1,4 +1,5 @@
--- Contract v1.0.0 — initial schema.
+-- Contract v2.0.0 — initial schema (regenerated for v2: users.email,
+-- users.email_verified_at and email_verification_tokens). Nothing had been deployed.
 -- Generated with `prisma migrate diff --from-empty`, then extended by hand with
 -- the CITEXT extension and the CHECK constraints Prisma cannot express.
 
@@ -12,10 +13,24 @@ CREATE TYPE "event_type" AS ENUM ('LAN_PARTY', 'JUEGO_ONLINE', 'PLAN_GATO', 'DND
 CREATE TABLE "users" (
     "id" UUID NOT NULL,
     "username" CITEXT NOT NULL,
+    "email" VARCHAR(254) NOT NULL,
+    "email_verified_at" TIMESTAMPTZ(3),
     "password_hash" TEXT NOT NULL,
     "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "users_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "email_verification_tokens" (
+    "id" UUID NOT NULL,
+    "user_id" UUID NOT NULL,
+    "token_hash" CHAR(64) NOT NULL,
+    "expires_at" TIMESTAMPTZ(3) NOT NULL,
+    "used_at" TIMESTAMPTZ(3),
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "email_verification_tokens_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -60,6 +75,15 @@ CREATE TABLE "attendances" (
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "email_verification_tokens_token_hash_key" ON "email_verification_tokens"("token_hash");
+
+-- CreateIndex
+CREATE INDEX "email_verification_tokens_user_id_idx" ON "email_verification_tokens"("user_id");
+
+-- CreateIndex
 CREATE INDEX "event_templates_owner_id_idx" ON "event_templates"("owner_id");
 
 -- CreateIndex
@@ -76,6 +100,9 @@ CREATE INDEX "calendar_entries_added_by_idx" ON "calendar_entries"("added_by");
 
 -- CreateIndex
 CREATE INDEX "attendances_user_id_idx" ON "attendances"("user_id");
+
+-- AddForeignKey
+ALTER TABLE "email_verification_tokens" ADD CONSTRAINT "email_verification_tokens_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "event_templates" ADD CONSTRAINT "event_templates_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -96,7 +123,18 @@ ALTER TABLE "attendances" ADD CONSTRAINT "attendances_user_id_fkey" FOREIGN KEY 
 -- CheckConstraints (hand-written; keep in sync with packages/shared/src/constants.ts)
 ALTER TABLE "users"
   ADD CONSTRAINT "users_username_format_check"
-  CHECK ("username"::text ~ '^[A-Za-z0-9_-]{3,30}$');
+  CHECK ("username"::text ~ '^[A-Za-z0-9_-]{3,30}$'),
+  -- Stored lowercase so the unique index is effectively case-insensitive.
+  -- Max length (254) is the VARCHAR(254) type itself.
+  ADD CONSTRAINT "users_email_lowercase_check"
+  CHECK ("email" = lower("email")),
+  ADD CONSTRAINT "users_email_format_check"
+  CHECK ("email" ~ '^[^@[:space:]]+@[^@[:space:]]+$');
+
+-- Only the SHA-256 of the token is stored: exactly 64 lowercase hex chars.
+ALTER TABLE "email_verification_tokens"
+  ADD CONSTRAINT "email_verification_tokens_token_hash_format_check"
+  CHECK ("token_hash" ~ '^[0-9a-f]{64}$');
 
 ALTER TABLE "event_templates"
   ADD CONSTRAINT "event_templates_name_length_check"

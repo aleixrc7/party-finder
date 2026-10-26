@@ -19,7 +19,7 @@ Read `docs/plan.md` before starting. If anything in this file contradicts the pl
 - `/prisma`: `schema.prisma`, the initial migration, and the seed
 - `/docs/openapi.yaml` and `/docs/contract-changelog.md`
 - `/infra`: `docker-compose.yml`, Caddy config, and `.env.example`
-- Root files: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, ESLint and Prettier config, `.github/workflows`
+- Root files: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, ESLint and Prettier config, `.github/workflows`, and `.github/dependabot.yml`
 
 **Never write** to `/apps/api`, `/apps/web`, or `/e2e`. You may create each app's empty folder with a minimal `package.json`, nothing more.
 
@@ -28,6 +28,7 @@ Read `docs/plan.md` before starting. If anything in this file contradicts the pl
 - pnpm workspaces monorepo with strict TypeScript (`strict: true`, `noUncheckedIndexedAccess: true`)
 - Backend: NestJS · Frontend: React + Vite
 - PostgreSQL + Prisma · Redis · MinIO locally (S3 or R2 in production)
+- Email: Mailpit locally to capture messages; a transactional provider (Resend or Postmark) in production
 - Zod as the single source of validation, shared by front and back
 
 ## Phase 0 deliverables
@@ -36,26 +37,53 @@ Read `docs/plan.md` before starting. If anything in this file contradicts the pl
 2. **`packages/shared`**:
    - `EventType` enum: `LAN_PARTY`, `JUEGO_ONLINE`, `PLAN_GATO`, `DND`, `PASEO`, `PSICOLOGO`, `PELUQUERIA`, `OTROS`
    - Spanish display-label map (the UI is in Spanish): LAN PARTY, Juego online, Plan de Gato, D&D, Paseo, Psicólogo, Peluquería, Otros
-   - Constants: `MAX_EVENTS_PER_DAY = 4`, `MIN_CAPACITY = 1`, `MAX_CAPACITY = 10`, `MAX_IMAGE_BYTES = 5 * 1024 * 1024`
-   - Zod schemas for every request and response, with their inferred types exported
+   - Constants: `MAX_EVENTS_PER_DAY = 4`, `MIN_CAPACITY = 1`, `MAX_CAPACITY = 10`, `MAX_IMAGE_BYTES = 5 * 1024 * 1024`, `VERIFICATION_TOKEN_TTL_HOURS = 24`, `UNVERIFIED_ACCOUNT_TTL_DAYS = 7`
+   - Zod schemas for every request and response, with their inferred types exported. Email is validated as an email address, max 254 characters, and normalized to lowercase.
    - A single error format: `{ code: string, message: string, details?: unknown }`
-3. **`schema.prisma`**, with an initial migration and a seed of 3 users, 5 templates, and entries in the current month:
-   - `User`: id (uuid), username (unique, 3–30 chars, only letters, digits, `_` and `-`), passwordHash, createdAt
+   - Named error codes: `DAY_FULL`, `ENTRY_FULL`, `ALREADY_ATTENDING`, `USERNAME_TAKEN`, `EMAIL_NOT_VERIFIED`, `INVALID_OR_EXPIRED_TOKEN`
+3. **`schema.prisma`**, with an initial migration and a seed of 3 verified users, 1 unverified user, 5 templates, and entries in the current month:
+   - `User`: id (uuid), username (unique, 3–30 chars, only letters, digits, `_` and `-`), email (unique, stored lowercase), emailVerifiedAt? (null until verified), passwordHash, createdAt
+   - `EmailVerificationToken`: id, userId → User (`onDelete: Cascade`), tokenHash (unique; hex SHA-256, never the plain token), expiresAt, usedAt?, createdAt; index on `userId`
    - `EventTemplate`: id, ownerId → User, name (1–80), description (1–1000), type (enum), imageUrl?, attendees? (1–10), startTime? and endTime? (text `HH:mm`), createdAt, updatedAt
    - `CalendarEntry`: id, templateId → EventTemplate (`onDelete: Restrict`), date (`date` type, no time), capacity (1–10), addedById → User, createdAt; index on `date`
    - `Attendance`: entryId → CalendarEntry (`onDelete: Cascade`), userId → User, createdAt; primary key `(entryId, userId)`
    - Add a `CHECK (capacity BETWEEN 1 AND 10)` in the SQL migration
 4. **`docs/openapi.yaml`** with every endpoint, its bodies, responses, and status codes (see table).
-5. **`infra/docker-compose.yml`**: postgres, redis, and minio with volumes and healthchecks; `.env.example` with no real secrets.
+5. **`infra/docker-compose.yml`**: postgres, redis, minio, and mailpit (SMTP on port 1025, web UI on 8025) with volumes and healthchecks; `.env.example` with no real secrets, including `WEB_ORIGIN`, `MAIL_FROM`, `MAIL_TRANSPORT` (`smtp` or the provider), `SMTP_HOST`, `SMTP_PORT`, and an empty provider key.
 6. **CI** (GitHub Actions): install, lint, typecheck, and test on every push and PR.
-7. **`docs/contract-changelog.md`** with the `v1.0.0` entry.
+7. **Automated security in CI** (see the next section).
+8. **`docs/contract-changelog.md`** with the `v1.0.0` entry.
+
+## Automated security in CI
+
+Create a `security.yml` workflow that runs on every PR, on every push to `main`, and once a week (to catch new vulnerabilities in dependencies that have not changed). It has these jobs:
+
+| Job | Tool | What it does | Fails when |
+| --- | --- | --- | --- |
+| `sast` | Semgrep | `semgrep scan --config p/typescript --config p/nodejs --config p/owasp-top-ten --config security/semgrep --error` | There are ERROR-severity findings |
+| `deps` | pnpm audit | `pnpm audit --prod --audit-level=high` | There are high or critical vulnerabilities |
+| `secrets` | gitleaks | On PRs, only the new commits; on `main` and weekly, the full history. Always with `--redact` | Any secret is found |
+| `containers` | Trivy and hadolint | `trivy fs .` and `trivy config infra/` with `--severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed`; `hadolint` on every Dockerfile | There are high or critical vulnerabilities with a fix available, or hadolint errors |
+
+Also:
+
+- **Dependabot** (`.github/dependabot.yml`): weekly updates for npm, Docker, and GitHub Actions, grouping patch updates to avoid flooding PRs.
+- **Least privilege**: `permissions: contents: read` in every workflow; raise it only in the job that needs it.
+- **Actions pinned by commit SHA**, not by tag, so nobody can change the code of an action you already use.
+- **Exceptions**: false positives are ignored only in `security/exceptions/` (`.semgrepignore`, `.gitleaks.toml`, `.trivyignore`), each with a comment saying why and until when. The Security agent proposes them; you only reference those files from the workflow.
+- Make the `security.yml` workflow **required** to merge into `main` (tell the user: it is enabled in GitHub branch protection, together with secret scanning and push protection).
+- Tools that are not in the package registry run through their official GitHub Action or Docker image, never through scripts downloaded with `curl | sh`.
+
+If Phase 0 is already finished, add this as an infrastructure change (it does not affect the contract, so the version does not change) and record it in the changelog.
 
 ## Contract v1 endpoints
 
 | Method and route | Access | Key responses |
 | --- | --- | --- |
-| POST /auth/register | Public + CAPTCHA token | 201, 400, 409 username taken, 429 |
-| POST /auth/login | Public | 200 + session cookie, 401 generic, 429 |
+| POST /auth/register | Public + CAPTCHA token | Body: username, email, password, captchaToken. 202 with a generic message (no session), 400, 409 `USERNAME_TAKEN`, 429 |
+| POST /auth/verify-email | Public | Body: `{ token }`. 200, 400 `INVALID_OR_EXPIRED_TOKEN`, 429 |
+| POST /auth/resend-verification | Public | Body: `{ email }`. Always 202 with the same generic message, 429 |
+| POST /auth/login | Public | 200 + session cookie, 401 generic, 403 `EMAIL_NOT_VERIFIED`, 429 |
 | POST /auth/logout | Authenticated | 204 |
 | GET /auth/me | Public | 200 `{ user \| null }` |
 | GET /auth/csrf | Public | 200 `{ token }` |
@@ -74,12 +102,26 @@ Each entry from `GET /calendar` includes its template, `capacity`, `attendeeCoun
 
 Requests that modify data require the `X-CSRF-Token` header. The session travels in an `httpOnly` cookie; the contract never exposes session tokens.
 
+## Email verification (contract)
+
+Follow the Email verification section of `docs/plan.md`. What the contract must pin down:
+
+- Sign-up never reveals whether an email already exists: the responses of `register` and `resend-verification` are identical in every case. Only a taken username returns 409, because usernames are public.
+- The verification token always travels in the **body** of a POST, never in an API query string. The email link points to the web app (`{WEB_ORIGIN}/verificar-email?token=…`), and the page makes the POST.
+- `EMAIL_NOT_VERIFIED` is returned only when the password is correct.
+- Document the exact text of the generic messages in `openapi.yaml`, so Frontend shows them verbatim.
+
+If contract v1 already exists without email verification, treat this as a change request: it is breaking (the `register` body and response change), so bump to `v2.0.0` and record it in the changelog.
+
 ## Decisions already made (defaults)
 
 - The template's `attendees` value is the default for the 1–10 dropdown when adding it to a day.
 - Editing a template is reflected in its entries; deleting it returns 409 while it is in use.
 - Capacity is fixed once the entry has been added.
 - `startTime` and `endTime` are times of day; the calendar provides the date.
+- Unverified accounts are deleted automatically after 7 days.
+- Email change and password recovery are out of scope for v1.
+- The production email provider is not part of the contract: the backend hides it behind an interface.
 
 If any of these decisions change, the user will tell you. Do not change them on your own.
 
@@ -94,12 +136,12 @@ Backend and Frontend may not touch the contract. When you receive a change reque
 
 ## Definition of done
 
-- [ ] `docker compose up` starts healthy postgres, redis, and minio
+- [ ] `docker compose up` starts healthy postgres, redis, minio, and mailpit, and the Mailpit UI opens at `localhost:8025`
 - [ ] `pnpm install && pnpm lint && pnpm typecheck` pass with no errors
 - [ ] `prisma migrate dev` and the seed work on an empty database
 - [ ] `openapi.yaml` is valid (checked with `@redocly/cli lint`)
 - [ ] Every endpoint in the table has its Zod schemas in `shared`
-- [ ] CI is green
+- [ ] CI is green, including the `security.yml` workflow and its four jobs
 
 ## When you finish
 

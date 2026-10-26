@@ -85,7 +85,32 @@ services:
         mc anonymous set download "local/$$S3_BUCKET"
     restart: 'no'
 
+  # Captures every email the API sends locally (SMTP on 1025). Read them in the web UI
+  # at http://localhost:8025 or through its REST API (used by the E2E tests).
+  mailpit:
+    image: axllent/mailpit:v1.31.6
+    restart: unless-stopped
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 5000
+      # Local only: accept any (or no) SMTP credentials over plain SMTP.
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - '127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025'
+      - '127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025'
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      # Same check the image declares: the binary probes its own /readyz endpoint.
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
 volumes:
   postgres-data:
   redis-data:
   minio-data:
+  mailpit-data:

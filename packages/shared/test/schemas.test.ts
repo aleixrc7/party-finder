@@ -1,20 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
+  AUTH_MESSAGES,
   ApiErrorSchema,
   CalendarEntrySchema,
   CalendarQuerySchema,
   CreateCalendarEntryRequestSchema,
   CreateEventTemplateRequestSchema,
+  EMAIL_MAX_LENGTH,
   EVENT_TYPES,
   EVENT_TYPE_LABELS,
+  EmailSchema,
+  ErrorCode,
   EventTemplatePageSchema,
   LoginRequestSchema,
   MAX_CAPACITY,
   MeResponseSchema,
   PaginationQuerySchema,
   RegisterRequestSchema,
+  RegisterResponseSchema,
+  ResendVerificationRequestSchema,
+  ResendVerificationResponseSchema,
+  UNVERIFIED_ACCOUNT_TTL_DAYS,
   UpdateEventTemplateRequestSchema,
+  VERIFICATION_TOKEN_MAX_LENGTH,
+  VERIFICATION_TOKEN_TTL_HOURS,
+  VerifyEmailRequestSchema,
+  VerifyEmailResponseSchema,
   daysInRangeInclusive,
   toValidationErrorDetails,
 } from '../src';
@@ -29,11 +41,51 @@ describe('EventType', () => {
   });
 });
 
+describe('EmailSchema', () => {
+  it('trims and lowercases', () => {
+    expect(EmailSchema.parse('  Ana.Garcia@Example.COM ')).toBe('ana.garcia@example.com');
+  });
+
+  it('accepts exactly 254 characters and rejects 255', () => {
+    const domain = '@example.com';
+    const at254 = `${'a'.repeat(64)}.${'b'.repeat(254 - 65 - domain.length)}${domain}`;
+    expect(at254).toHaveLength(EMAIL_MAX_LENGTH);
+    expect(EmailSchema.safeParse(at254).success).toBe(true);
+    expect(EmailSchema.safeParse(`c${at254}`).success).toBe(false);
+  });
+
+  it.each(['', 'ana', 'ana@', '@example.com', 'ana@example', 'ana @example.com', 'a@b@c.com'])(
+    'rejects %j',
+    (email) => {
+      expect(EmailSchema.safeParse(email).success).toBe(false);
+    },
+  );
+});
+
 describe('RegisterRequestSchema', () => {
-  const valid = { username: 'ana_01-x', password: 'secret123', captchaToken: 'tok' };
+  const valid = {
+    username: 'ana_01-x',
+    email: 'ana@example.com',
+    password: 'secret123',
+    captchaToken: 'tok',
+  };
 
   it('accepts a valid body', () => {
     expect(RegisterRequestSchema.parse(valid)).toEqual(valid);
+  });
+
+  it('normalizes the email', () => {
+    expect(RegisterRequestSchema.parse({ ...valid, email: ' ANA@Example.com' }).email).toBe(
+      'ana@example.com',
+    );
+  });
+
+  it('requires a valid email', () => {
+    const { email: _email, ...withoutEmail } = valid;
+    expect(RegisterRequestSchema.safeParse(withoutEmail).success).toBe(false);
+    expect(RegisterRequestSchema.safeParse({ ...valid, email: 'not-an-email' }).success).toBe(
+      false,
+    );
   });
 
   it.each(['ab', 'a'.repeat(31), 'con espacio', 'ñandú', 'ana!'])(
@@ -50,6 +102,77 @@ describe('RegisterRequestSchema', () => {
 
   it('rejects unknown fields', () => {
     expect(RegisterRequestSchema.safeParse({ ...valid, isAdmin: true }).success).toBe(false);
+  });
+});
+
+describe('generic 202 responses', () => {
+  it('register and resend-verification share the exact same body', () => {
+    const body = { message: AUTH_MESSAGES.VERIFICATION_EMAIL_SENT };
+    expect(RegisterResponseSchema.parse(body)).toEqual(body);
+    expect(ResendVerificationResponseSchema.parse(body)).toEqual(body);
+  });
+
+  it('rejects any other text and never carries the user', () => {
+    expect(RegisterResponseSchema.safeParse({ message: 'Usuario creado' }).success).toBe(false);
+    expect(
+      RegisterResponseSchema.parse({
+        message: AUTH_MESSAGES.VERIFICATION_EMAIL_SENT,
+        user: { id: UUID, username: 'ana' },
+      }),
+    ).toEqual({ message: AUTH_MESSAGES.VERIFICATION_EMAIL_SENT });
+  });
+});
+
+describe('VerifyEmailRequestSchema', () => {
+  const token = 'q7Lr0b6m3JxZQ1n9vYk2pT8sWfE4hA5cD0gU-iO_aBc';
+
+  it('accepts a token in the body', () => {
+    expect(token).toHaveLength(43);
+    expect(VerifyEmailRequestSchema.parse({ token })).toEqual({ token });
+  });
+
+  it('checks only the shape (malformed tokens are INVALID_OR_EXPIRED_TOKEN, not 400 validation)', () => {
+    expect(VerifyEmailRequestSchema.safeParse({ token: 'short!' }).success).toBe(true);
+  });
+
+  it('rejects a missing, empty, oversized or non-string token and unknown fields', () => {
+    expect(VerifyEmailRequestSchema.safeParse({}).success).toBe(false);
+    expect(VerifyEmailRequestSchema.safeParse({ token: '' }).success).toBe(false);
+    expect(
+      VerifyEmailRequestSchema.safeParse({ token: 'x'.repeat(VERIFICATION_TOKEN_MAX_LENGTH + 1) })
+        .success,
+    ).toBe(false);
+    expect(VerifyEmailRequestSchema.safeParse({ token: 123 }).success).toBe(false);
+    expect(VerifyEmailRequestSchema.safeParse({ token, email: 'a@b.co' }).success).toBe(false);
+  });
+
+  it('pins the success message', () => {
+    expect(
+      VerifyEmailResponseSchema.safeParse({ message: AUTH_MESSAGES.EMAIL_VERIFIED }).success,
+    ).toBe(true);
+    expect(VerifyEmailResponseSchema.safeParse({ message: 'OK' }).success).toBe(false);
+  });
+});
+
+describe('ResendVerificationRequestSchema', () => {
+  it('normalizes the email and rejects anything else', () => {
+    expect(ResendVerificationRequestSchema.parse({ email: 'Bruno@Example.com ' })).toEqual({
+      email: 'bruno@example.com',
+    });
+    expect(ResendVerificationRequestSchema.safeParse({ email: 'bruno' }).success).toBe(false);
+    expect(
+      ResendVerificationRequestSchema.safeParse({ email: 'bruno@example.com', username: 'b' })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe('verification constants', () => {
+  it('match the plan', () => {
+    expect(VERIFICATION_TOKEN_TTL_HOURS).toBe(24);
+    expect(UNVERIFIED_ACCOUNT_TTL_DAYS).toBe(7);
+    expect(ErrorCode.EMAIL_NOT_VERIFIED).toBe('EMAIL_NOT_VERIFIED');
+    expect(ErrorCode.INVALID_OR_EXPIRED_TOKEN).toBe('INVALID_OR_EXPIRED_TOKEN');
   });
 });
 

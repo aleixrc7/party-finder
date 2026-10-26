@@ -13,6 +13,13 @@ export const ErrorCode = {
   UNAUTHENTICATED: 'UNAUTHENTICATED',
   /** 401: login failed. Deliberately generic: never says whether the username exists. */
   INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
+  /**
+   * 403: login with the CORRECT password on an account whose email is not verified yet.
+   * Never returned when the password is wrong (that is always 401 INVALID_CREDENTIALS).
+   */
+  EMAIL_NOT_VERIFIED: 'EMAIL_NOT_VERIFIED',
+  /** 400: verification token unknown, expired, already used or malformed. No further detail. */
+  INVALID_OR_EXPIRED_TOKEN: 'INVALID_OR_EXPIRED_TOKEN',
   /** 403: missing or invalid `X-CSRF-Token` header. */
   CSRF_INVALID: 'CSRF_INVALID',
   /** 403: authenticated, but not allowed to act on this resource. */

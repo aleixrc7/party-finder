@@ -1,10 +1,14 @@
-// Contract v1.0.0. Owned by the Architect: schema changes that affect the
+// Contract v2.0.0. Owned by the Architect: schema changes that affect the
 // contract go through a change request (see docs/contract-changelog.md).
 //
 // Rules Prisma cannot express live as raw SQL in the initial migration:
 //   - CHECK constraints on lengths, formats and ranges
 //   - username is CITEXT, so uniqueness and lookups are case-insensitive
+//   - email is stored lowercase (CHECK email = lower(email)); the API normalizes it
+//     with the shared EmailSchema before every write and lookup
+//   - token_hash is exactly 64 lowercase hex chars (SHA-256)
 // MAX_EVENTS_PER_DAY (4) is enforced by the API inside a transaction.
+// A user cannot log in while emailVerifiedAt is null (enforced by the API).
 
 generator client {
   provider = "prisma-client-js"
@@ -29,17 +33,40 @@ enum EventType {
 }
 
 model User {
-  id           String   @id @default(uuid()) @db.Uuid
+  id              String    @id @default(uuid()) @db.Uuid
   /// 3–30 chars, [A-Za-z0-9_-]. Case-insensitive unique (CITEXT).
-  username     String   @unique @db.Citext
-  passwordHash String   @map("password_hash")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  username        String    @unique @db.Citext
+  /// Max 254 chars, always lowercase (CHECK). Unique.
+  email           String    @unique @db.VarChar(254)
+  /// Null until the email is verified. No login while null.
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
+  passwordHash    String    @map("password_hash")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  templates       EventTemplate[]
-  calendarEntries CalendarEntry[]
-  attendances     Attendance[]
+  templates          EventTemplate[]
+  calendarEntries    CalendarEntry[]
+  attendances        Attendance[]
+  verificationTokens EmailVerificationToken[]
 
   @@map("users")
+}
+
+/// Email verification tokens. Only the SHA-256 of the token is stored, never the token.
+/// Valid for VERIFICATION_TOKEN_TTL_HOURS (24 h) and single use (usedAt).
+model EmailVerificationToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  /// sha256 of the base64url token string, as 64 lowercase hex chars (CHECK). Unique.
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  /// Set when the token is consumed. A resend invalidates older tokens (set this or delete them).
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
 }
 
 model EventTemplate {

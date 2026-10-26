@@ -6,6 +6,10 @@ import {
   MeResponseSchema,
   RegisterRequestSchema,
   RegisterResponseSchema,
+  ResendVerificationRequestSchema,
+  ResendVerificationResponseSchema,
+  VerifyEmailRequestSchema,
+  VerifyEmailResponseSchema,
 } from './auth';
 import {
   AttendResponseSchema,
@@ -47,7 +51,7 @@ export interface EndpointDef {
   /** JSON body schema, or `'multipart'` for file uploads. */
   body?: z.ZodType | 'multipart';
   success: {
-    status: 200 | 201 | 204;
+    status: 200 | 201 | 202 | 204;
     /** `null` means no body (204). */
     schema: z.ZodType | null;
   };
@@ -57,15 +61,16 @@ export interface EndpointDef {
 
 const { VALIDATION_ERROR, UNAUTHENTICATED, CSRF_INVALID, FORBIDDEN, NOT_FOUND } = ErrorCode;
 
-/** Machine-readable index of contract v1. Kept in sync with docs/openapi.yaml by a test. */
+/** Machine-readable index of the contract. Kept in sync with docs/openapi.yaml by a test. */
 export const endpoints = {
+  /** No session is opened. 202 is identical whether or not the email already exists. */
   register: {
     method: 'POST',
     path: '/auth/register',
     access: 'public',
     csrf: true,
     body: RegisterRequestSchema,
-    success: { status: 201, schema: RegisterResponseSchema },
+    success: { status: 202, schema: RegisterResponseSchema },
     errors: {
       400: [VALIDATION_ERROR, ErrorCode.CAPTCHA_FAILED],
       403: [CSRF_INVALID],
@@ -73,6 +78,35 @@ export const endpoints = {
       429: [ErrorCode.RATE_LIMITED],
     },
   },
+  /** No session is opened. Any token problem is the same 400 INVALID_OR_EXPIRED_TOKEN. */
+  verifyEmail: {
+    method: 'POST',
+    path: '/auth/verify-email',
+    access: 'public',
+    csrf: true,
+    body: VerifyEmailRequestSchema,
+    success: { status: 200, schema: VerifyEmailResponseSchema },
+    errors: {
+      400: [ErrorCode.INVALID_OR_EXPIRED_TOKEN, VALIDATION_ERROR],
+      403: [CSRF_INVALID],
+      429: [ErrorCode.RATE_LIMITED],
+    },
+  },
+  /** 202 is identical whether the email is unknown, unverified or already verified. */
+  resendVerification: {
+    method: 'POST',
+    path: '/auth/resend-verification',
+    access: 'public',
+    csrf: true,
+    body: ResendVerificationRequestSchema,
+    success: { status: 202, schema: ResendVerificationResponseSchema },
+    errors: {
+      400: [VALIDATION_ERROR],
+      403: [CSRF_INVALID],
+      429: [ErrorCode.RATE_LIMITED],
+    },
+  },
+  /** 403 EMAIL_NOT_VERIFIED only after the password has been validated. */
   login: {
     method: 'POST',
     path: '/auth/login',
@@ -83,7 +117,7 @@ export const endpoints = {
     errors: {
       400: [VALIDATION_ERROR],
       401: [ErrorCode.INVALID_CREDENTIALS],
-      403: [CSRF_INVALID],
+      403: [CSRF_INVALID, ErrorCode.EMAIL_NOT_VERIFIED],
       429: [ErrorCode.RATE_LIMITED],
     },
   },

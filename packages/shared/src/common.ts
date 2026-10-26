@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   DEFAULT_PAGE_SIZE,
+  EMAIL_MAX_LENGTH,
   MAX_PAGE_SIZE,
   TIME_OF_DAY_PATTERN,
   USERNAME_MAX_LENGTH,
@@ -28,7 +29,20 @@ export const UsernameSchema = z
   .max(USERNAME_MAX_LENGTH, `Máximo ${USERNAME_MAX_LENGTH} caracteres`)
   .regex(USERNAME_PATTERN, 'Solo letras, números, guion bajo (_) y guion (-)');
 
-/** Public view of a user. Never includes credentials. */
+/**
+ * Email address: trimmed and lowercased first, then checked (max 254 chars, valid address).
+ * The parsed value is what the API stores and compares, so `Ana@Example.com ` and
+ * `ana@example.com` are the same email.
+ */
+export const EmailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(EMAIL_MAX_LENGTH, `Máximo ${EMAIL_MAX_LENGTH} caracteres`)
+  .pipe(z.email('Correo electrónico no válido'));
+export type Email = z.output<typeof EmailSchema>;
+
+/** Public view of a user. Never includes credentials or the email. */
 export const UserSummarySchema = z.object({
   id: UuidSchema,
   username: z.string(),

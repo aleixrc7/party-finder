@@ -1,22 +1,57 @@
 openapi: 3.1.0
 info:
   title: Party Finder API
-  version: 1.0.0
+  version: 2.0.0
   summary: Shared calendar of plans
   description: |
-    Contract v1 between Backend (`apps/api`) and Frontend (`apps/web`).
+    Contract v2 between Backend (`apps/api`) and Frontend (`apps/web`).
     The Zod schemas in `packages/shared` are the executable version of this document;
-    both must always agree (a test in `packages/shared` checks routes and status codes).
+    both must always agree (a test in `packages/shared` checks routes, status codes and
+    the exact auth message texts). See `docs/contract-changelog.md` for what changed.
 
     ## Sessions
-    The session travels in an `httpOnly`, `Secure`, `SameSite=Lax` cookie set by
-    `POST /auth/login` and `POST /auth/register`. The API never returns session tokens.
+    The session travels in an `httpOnly`, `Secure`, `SameSite=Lax` cookie set only by
+    `POST /auth/login`. Register and email verification never open a session.
+    The API never returns session tokens.
 
     ## CSRF
-    Every `POST`, `PATCH` and `DELETE` request must send the `X-CSRF-Token` header.
-    Get the token from `GET /auth/csrf`. The token is bound to the current session,
-    so fetch a new one after login, register and logout. A missing or wrong token
-    returns `403 CSRF_INVALID`.
+    Every `POST`, `PATCH` and `DELETE` request must send the `X-CSRF-Token` header,
+    including the public auth endpoints. Get the token from `GET /auth/csrf`. The token
+    is bound to the current (anonymous or authenticated) session, so fetch a new one after
+    login and logout. A missing or wrong token returns `403 CSRF_INVALID`.
+
+    ## Email verification
+    An account cannot log in until its email is verified.
+    1. `POST /auth/register` (username, email, password, CAPTCHA) creates an unverified
+       user and answers `202` with the generic message
+       "Si los datos son válidos, recibirás un correo electrónico." No session is opened.
+       If the email already belongs to an account, nothing is created and the email sent
+       says so instead of carrying a link; the HTTP response is exactly the same.
+    2. The email links to the **web app**, never to the API:
+       `{WEB_ORIGIN}/verificar-email?token=<token>`. The token is 32 random bytes,
+       base64url-encoded without padding (43 chars), valid for 24 hours and single use.
+       The database stores only the SHA-256 of that token string (64 lowercase hex chars),
+       never the token itself.
+    3. The `/verificar-email` page reads the token from its URL and sends it in the
+       **body** of `POST /auth/verify-email`. The token never goes in an API query
+       string. The page uses `Referrer-Policy: no-referrer`.
+    4. Any token problem (malformed, unknown, expired, already used) is
+       `400 INVALID_OR_EXPIRED_TOKEN`, with no further detail.
+    5. Logging in with the correct password on an unverified account returns
+       `403 EMAIL_NOT_VERIFIED` (no session). With a wrong password it is always
+       `401 INVALID_CREDENTIALS`, verified or not.
+    6. `POST /auth/resend-verification` (`{ email }`) always answers `202` with the same
+       generic message as register. If the email belongs to an unverified account, previous
+       tokens are invalidated and a new one is sent. Limits: 1 per minute and 5 per day per
+       email (applied equally to unknown emails), on top of the per-IP limit; over the
+       limit → `429 RATE_LIMITED`.
+
+    Unverified accounts are deleted 7 days after sign-up, freeing username and email.
+    Email addresses are trimmed and lowercased before validation and storage.
+
+    The exact texts of the auth messages are part of the contract (`AUTH_MESSAGES` in
+    `@party-finder/shared`): the UI shows them verbatim. They are pinned with `const`
+    in the response schemas below.
 
     ## Errors
     Every non-2xx response uses the single `ApiError` format `{ code, message, details? }`.
@@ -56,8 +91,14 @@ paths:
     post:
       tags: [auth]
       operationId: register
-      summary: Create a user and open a session
-      description: Requires a valid Cloudflare Turnstile token. Usernames are unique case-insensitively.
+      summary: Create an unverified user and send the verification email
+      description: >-
+        Requires a valid Cloudflare Turnstile token. Usernames are unique case-insensitively.
+        Does **not** open a session and does not return the user. The `202` response is
+        identical whether the email is new or already registered (in that case nothing is
+        created and the email sent tells the owner they already have an account). Only a
+        taken username, which is public, returns `409`. If sending the email fails the
+        response is still `202`; the user can ask for a resend.
       security: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
@@ -68,21 +109,14 @@ paths:
             schema:
               $ref: '#/components/schemas/RegisterRequest'
       responses:
-        '201':
-          description: User created; the session cookie is set.
-          headers:
-            Set-Cookie:
-              $ref: '#/components/headers/SetSessionCookie'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AuthUserResponse'
+        '202':
+          $ref: '#/components/responses/VerificationEmailSent'
         '400':
           $ref: '#/components/responses/BadRequestOrCaptcha'
         '403':
           $ref: '#/components/responses/CsrfInvalid'
         '409':
-          description: '`USERNAME_TAKEN`: the username already exists.'
+          description: '`USERNAME_TAKEN`: the username already exists (verified or not).'
           content:
             application/json:
               schema:
@@ -93,12 +127,95 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /auth/verify-email:
+    post:
+      tags: [auth]
+      operationId: verifyEmail
+      summary: Verify an account with the token from the email link
+      description: >-
+        Called by the web page `/verificar-email?token=…` when it loads, with the token in
+        the body (never in a query string). Checks the SHA-256 of the token, its expiry
+        (24 h) and that it is unused, then sets the user's `email_verified_at` and the
+        token's `used_at` in one transaction. Does **not** open a session: the user logs in
+        afterwards. Strict per-IP rate limit.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailRequest'
+      responses:
+        '200':
+          description: Account verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyEmailResponse'
+        '400':
+          description: >-
+            `INVALID_OR_EXPIRED_TOKEN` when the token is malformed, unknown, expired or already
+            used, always with the same message and no `details`. `VALIDATION_ERROR` only when
+            the body is not `{ token: string }`. The UI treats any 400 as "link expired" and
+            offers a resend.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/InvalidOrExpiredTokenError'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                invalidToken:
+                  value:
+                    code: INVALID_OR_EXPIRED_TOKEN
+                    message: El enlace de verificación no es válido o ha caducado.
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/resend-verification:
+    post:
+      tags: [auth]
+      operationId: resendVerification
+      summary: Send a new verification email
+      description: >-
+        Always answers `202` with the same generic message as register, whether the email is
+        unknown, unverified or already verified. For an unverified account it invalidates
+        previous tokens and sends a new one. Limits: 1 per minute and 5 per day per email
+        (counted the same for unknown emails) plus a per-IP limit; over the limit →
+        `429 RATE_LIMITED`. `400` only for a malformed body, which does not depend on whether
+        the email exists.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '202':
+          $ref: '#/components/responses/VerificationEmailSent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/CsrfInvalid'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /auth/login:
     post:
       tags: [auth]
       operationId: login
       summary: Open a session
-      description: Strict rate limit per IP and per username, with progressive delay after failures.
+      description: >-
+        Login is by **username** and password. Strict rate limit per IP and per username,
+        with progressive delay after failures. The email-verification check happens only
+        after the password has been validated.
       security: []
       parameters:
         - $ref: '#/components/parameters/CsrfToken'
@@ -123,16 +240,35 @@ paths:
         '401':
           description: >-
             `INVALID_CREDENTIALS`. Always the same generic message, whether the username
-            does not exist or the password is wrong.
+            does not exist or the password is wrong (verified account or not).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/InvalidCredentialsError'
               example:
                 code: INVALID_CREDENTIALS
-                message: Usuario o contraseña incorrectos
+                message: Usuario o contraseña incorrectos.
         '403':
-          $ref: '#/components/responses/CsrfInvalid'
+          description: >-
+            `EMAIL_NOT_VERIFIED`: the password is correct but the email is not verified yet;
+            no session is opened. The UI offers to resend the email: since login is by
+            username, it asks the user for their email and calls
+            `POST /auth/resend-verification`. Or `CSRF_INVALID`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/EmailNotVerifiedError'
+                  - $ref: '#/components/schemas/ApiError'
+              examples:
+                emailNotVerified:
+                  value:
+                    code: EMAIL_NOT_VERIFIED
+                    message: Debes verificar tu correo electrónico antes de iniciar sesión.
+                csrf:
+                  value:
+                    code: CSRF_INVALID
+                    message: Token CSRF no válido
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -545,6 +681,16 @@ components:
         type: string
 
   responses:
+    VerificationEmailSent:
+      description: >-
+        Accepted. Always exactly this body, whatever the email (new, registered, verified,
+        unknown), so the response never reveals which emails are registered. No session.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VerificationEmailSentResponse'
+          example:
+            message: Si los datos son válidos, recibirás un correo electrónico.
     BadRequest:
       description: '`VALIDATION_ERROR`: body, query or path failed validation.'
       content:
@@ -672,9 +818,10 @@ components:
           type: string
           description: >-
             Machine-readable code. Known values: VALIDATION_ERROR, CAPTCHA_FAILED,
-            UNAUTHENTICATED, INVALID_CREDENTIALS, CSRF_INVALID, FORBIDDEN, NOT_FOUND,
-            USERNAME_TAKEN, TEMPLATE_IN_USE, DAY_FULL, ENTRY_FULL, ALREADY_ATTENDING,
-            PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, RATE_LIMITED, INTERNAL_ERROR.
+            UNAUTHENTICATED, INVALID_CREDENTIALS, EMAIL_NOT_VERIFIED, INVALID_OR_EXPIRED_TOKEN,
+            CSRF_INVALID, FORBIDDEN, NOT_FOUND, USERNAME_TAKEN, TEMPLATE_IN_USE, DAY_FULL,
+            ENTRY_FULL, ALREADY_ATTENDING, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE,
+            RATE_LIMITED, INTERNAL_ERROR. Clients must tolerate unknown codes.
         message:
           type: string
         details: {}
@@ -704,6 +851,39 @@ components:
                     - type: integer
               message:
                 type: string
+    InvalidCredentialsError:
+      type: object
+      required: [code, message]
+      description: Login failure. Exact, generic text.
+      properties:
+        code:
+          type: string
+          const: INVALID_CREDENTIALS
+        message:
+          type: string
+          const: Usuario o contraseña incorrectos.
+    EmailNotVerifiedError:
+      type: object
+      required: [code, message]
+      description: Correct password, unverified email. Exact text; no `details`.
+      properties:
+        code:
+          type: string
+          const: EMAIL_NOT_VERIFIED
+        message:
+          type: string
+          const: Debes verificar tu correo electrónico antes de iniciar sesión.
+    InvalidOrExpiredTokenError:
+      type: object
+      required: [code, message]
+      description: Any verification-token problem. Exact text; no `details`.
+      properties:
+        code:
+          type: string
+          const: INVALID_OR_EXPIRED_TOKEN
+        message:
+          type: string
+          const: El enlace de verificación no es válido o ha caducado.
 
     UserSummary:
       type: object
@@ -714,16 +894,26 @@ components:
         username:
           type: string
 
+    Email:
+      type: string
+      format: email
+      maxLength: 254
+      description: >-
+        Trimmed and lowercased before validation; the lowercased value is what is stored
+        and compared (`Ana@Example.com` = `ana@example.com`). Max 254 chars after trimming.
+      examples: ['ana@example.com']
     RegisterRequest:
       type: object
       additionalProperties: false
-      required: [username, password, captchaToken]
+      required: [username, email, password, captchaToken]
       properties:
         username:
           type: string
           minLength: 3
           maxLength: 30
           pattern: '^[A-Za-z0-9_-]+$'
+        email:
+          $ref: '#/components/schemas/Email'
         password:
           type: string
           minLength: 8
@@ -733,11 +923,48 @@ components:
           minLength: 1
           maxLength: 2048
           description: Cloudflare Turnstile token.
+    VerificationEmailSentResponse:
+      type: object
+      required: [message]
+      description: Body of every `202` of register and resend-verification.
+      properties:
+        message:
+          type: string
+          const: Si los datos son válidos, recibirás un correo electrónico.
+    VerifyEmailRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: >-
+            The `token` query parameter of the web link, sent as is (base64url, 43 chars).
+            Only the shape is validated; a malformed token gets `400 INVALID_OR_EXPIRED_TOKEN`.
+    VerifyEmailResponse:
+      type: object
+      required: [message]
+      description: No session is opened and no user data is returned.
+      properties:
+        message:
+          type: string
+          const: Tu cuenta está verificada. Ya puedes iniciar sesión.
+    ResendVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          $ref: '#/components/schemas/Email'
     LoginRequest:
       type: object
       additionalProperties: false
       required: [username, password]
-      description: Only the shape is validated; a malformed username yields the generic 401.
+      description: >-
+        Login is by username. Only the shape is validated; a malformed username yields the
+        generic 401.
       properties:
         username:
           type: string

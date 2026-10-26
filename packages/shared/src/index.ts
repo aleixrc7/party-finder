@@ -1,6 +1,7 @@
 export * from './constants';
 export * from './enums';
 export * from './errors';
+export * from './messages';
 export * from './common';
 export * from './auth';
 export * from './event-templates';

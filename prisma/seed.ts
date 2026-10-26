@@ -1,15 +1,25 @@
 /**
- * Development seed: 3 users, 5 templates and calendar entries in the current month.
- * It WIPES the four tables first, so it can be re-run at will. Never run it in production.
+ * Development seed: 3 verified users, 1 unverified user, 5 templates and calendar
+ * entries in the current month. It WIPES every table first, so it can be re-run at will.
+ * Never run it in production.
  *
  * Every seeded user has the password in SEED_USER_PASSWORD (default below).
+ * The unverified user (dani) gets a fresh verification token; only its SHA-256 is stored
+ * and the plain link is printed to the console so the verification page can be tried.
  */
+import { createHash, randomBytes } from 'node:crypto';
 import { hash } from '@node-rs/argon2';
 import { EventType, PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 const DEFAULT_PASSWORD = 'party-finder-dev';
+const DEFAULT_WEB_ORIGIN = 'http://localhost:5173';
+// Same values as VERIFICATION_TOKEN_BYTES / VERIFICATION_TOKEN_TTL_HOURS / VERIFY_EMAIL_WEB_PATH
+// in @party-finder/shared (duplicated so the seed does not depend on the built package).
+const TOKEN_BYTES = 32;
+const TOKEN_TTL_HOURS = 24;
+const VERIFY_EMAIL_WEB_PATH = '/verificar-email';
 
 /** A day of the current UTC month as a `DATE`-friendly value (midnight UTC). */
 function dayOfCurrentMonth(day: number): Date {
@@ -29,15 +39,41 @@ async function main(): Promise<void> {
     prisma.attendance.deleteMany(),
     prisma.calendarEntry.deleteMany(),
     prisma.eventTemplate.deleteMany(),
+    prisma.emailVerificationToken.deleteMany(),
     prisma.user.deleteMany(),
   ]);
 
+  const verifiedAt = new Date();
   const [ana, bruno, carla] = await Promise.all(
     ['ana', 'bruno', 'carla'].map((username) =>
-      prisma.user.create({ data: { username, passwordHash } }),
+      prisma.user.create({
+        data: {
+          username,
+          email: `${username}@example.com`,
+          emailVerifiedAt: verifiedAt,
+          passwordHash,
+        },
+      }),
     ),
   );
   if (!ana || !bruno || !carla) throw new Error('Failed to create seed users');
+
+  // Unverified: login must answer 403 EMAIL_NOT_VERIFIED. Owns nothing and attends nothing.
+  // The token travels base64url-encoded; the DB keeps only sha256(token) in hex.
+  const token = randomBytes(TOKEN_BYTES).toString('base64url');
+  const dani = await prisma.user.create({
+    data: {
+      username: 'dani',
+      email: 'dani@example.com',
+      passwordHash,
+      verificationTokens: {
+        create: {
+          tokenHash: createHash('sha256').update(token).digest('hex'),
+          expiresAt: new Date(Date.now() + TOKEN_TTL_HOURS * 60 * 60 * 1000),
+        },
+      },
+    },
+  });
 
   const lan = await prisma.eventTemplate.create({
     data: {
@@ -129,8 +165,17 @@ async function main(): Promise<void> {
     });
   }
 
+  const webOrigin = process.env.WEB_ORIGIN ?? DEFAULT_WEB_ORIGIN;
+  const verifyUrl = new URL(VERIFY_EMAIL_WEB_PATH, webOrigin);
+  verifyUrl.searchParams.set('token', token);
+
   console.log(
-    `Seeded 3 users (ana, bruno, carla), 5 templates and ${entries.length} calendar entries.`,
+    `Seeded 3 verified users (ana, bruno, carla), 1 unverified user (${dani.username}), ` +
+      `5 templates and ${entries.length} calendar entries.`,
+  );
+  // Development only: the API itself never logs tokens or verification links.
+  console.log(
+    `Verification link for ${dani.username} (valid ${TOKEN_TTL_HOURS} h, single use): ${verifyUrl.href}`,
   );
 }
 
