@@ -1,5 +1,50 @@
 {
   "name": "@party-finder/web",
   "version": "0.0.0",
-  "private": true
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mocks": "vite --mode mocks",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^5",
+    "@party-finder/shared": "workspace:*",
+    "@radix-ui/react-context-menu": "^2",
+    "@radix-ui/react-dialog": "^1",
+    "@radix-ui/react-label": "^2",
+    "@radix-ui/react-slot": "^1",
+    "@tanstack/react-query": "^5",
+    "class-variance-authority": "^0.7",
+    "clsx": "^2",
+    "date-fns": "^4",
+    "lucide-react": "^1.65.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-hook-form": "^7",
+    "react-router": "^7",
+    "tailwind-merge": "^3",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@testing-library/dom": "^10",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "^16",
+    "@testing-library/user-event": "^14",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4",
+    "jsdom": "^26",
+    "msw": "^2",
+    "tailwindcss": "^4",
+    "typescript": "~5.9.3",
+    "vite": "^6",
+    "vitest": "^3.2.4"
+  }
 }

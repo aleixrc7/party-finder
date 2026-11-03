@@ -15,6 +15,8 @@
     "test": "pnpm -r --if-present run test",
     "infra:up": "docker compose -f infra/docker-compose.yml --env-file .env up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml --env-file .env down",
+    "infra:local:up": "docker compose -f infra/docker-compose.local.yml up -d",
+    "infra:local:down": "docker compose -f infra/docker-compose.local.yml down",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",

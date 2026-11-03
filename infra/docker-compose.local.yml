@@ -1,0 +1,7 @@
+# Same services as docker-compose.yml, with variables read from the root .env.local.
+# Start from the repo root with `pnpm infra:local:up`.
+name: party-finder
+
+include:
+  - path: docker-compose.yml
+    env_file: ../.env.local
